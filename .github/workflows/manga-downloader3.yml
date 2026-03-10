@@ -15,7 +15,11 @@ on:
   push:
     paths:
       - 'data.json'
-
+      
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+  
 jobs:
   download-and-send:
     runs-on: ubuntu-latest
