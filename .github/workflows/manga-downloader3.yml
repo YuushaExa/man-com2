@@ -1,0 +1,196 @@
+name: Manga Downloader → Telegram
+
+on:
+  workflow_dispatch:
+    inputs:
+      json_file:
+        description: 'Path to data.json file'
+        required: false
+        default: 'data.json'
+      optimize_images:
+        description: 'Optimize with Sharp (WebP, quality: 75, effort: 4)'
+        required: false
+        type: boolean
+        default: true
+  push:
+    paths:
+      - 'data.json'
+
+jobs:
+  download-and-send:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl zip
+          npm install
+
+      - name: Run downloader + Telegram sender
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          node basic.js \
+            "${{ github.event.inputs.json_file || 'data.json' }}" \
+            "${{ github.event.inputs.optimize_images || true }}"
+
+      - name: Update list.json (String Format)
+        run: |
+          node << 'EOF'
+            const fs = require('fs');
+            
+            const jsonFile = '${{ github.event.inputs.json_file || 'data.json' }}';
+            
+            // ✅ Read data.json
+            let data;
+            try {
+              data = JSON.parse(fs.readFileSync(jsonFile, 'utf8'));
+            } catch (e) {
+              console.error(`❌ Failed to read ${jsonFile}: ${e.message}`);
+              process.exit(1);
+            }
+            
+            const manga = data.manga || {};
+            
+            // ✅ Extract manga ID
+            function extractMangaId(url) {
+              if (!url) return null;
+              const match = String(url).trim().match(/\/title\/([^-\s\/]+)/);
+              return match ? match[1] : null;
+            }
+            
+            // ✅ Parse Chapter (for comparison only)
+            // Returns number for logic, but we store the string
+            function parseChapterToNumber(val) {
+              if (val === null || val === undefined) return null;
+              let str = String(val).trim().toLowerCase();
+              if (str === '' || str === '?' || str === 'n/a' || str === 'unknown') return null;
+              str = str.replace(',', '.'); // Handle 13,5
+              const match = str.match(/([0-9]+(?:\.[0-9]+)?)/);
+              if (!match) return null;
+              const num = parseFloat(match[1]);
+              return isNaN(num) || num < 0 ? null : num;
+            }
+            
+            // ✅ Clean Chapter String (for storage)
+            function cleanChapterString(val) {
+              if (val === null || val === undefined) return "?";
+              let str = String(val).trim();
+              if (str === '' || str.toLowerCase() === '?' || str.toLowerCase() === 'n/a') return "?";
+              // Replace comma decimal with dot for consistency
+              return str.replace(',', '.');
+            }
+            
+            const mangaId = extractMangaId(manga.url);
+            const rawChapter = manga.latest_chapter ?? manga.latestChapter ?? manga.chapter;
+            
+            const chapterNum = parseChapterToNumber(rawChapter);
+            const chapterStr = cleanChapterString(rawChapter);
+            
+            console.log(`📚 Manga: ${manga.title || 'Unknown'}`);
+            console.log(`🔗 ID: ${mangaId || 'N/A'}`);
+            console.log(`📖 Raw: "${rawChapter}" → Num: ${chapterNum} → Store: "${chapterStr}"`);
+            
+            // ✅ Load list.json
+            let list = {};
+            if (fs.existsSync('list.json')) {
+              try {
+                const parsed = JSON.parse(fs.readFileSync('list.json', 'utf8'));
+                if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                  list = parsed;
+                }
+              } catch (e) {
+                console.log('⚠️  Could not parse list.json, starting fresh');
+              }
+            }
+            
+            // ✅ Update Logic
+            if (mangaId) {
+              const existingStr = list[mangaId];
+              const existingNum = parseChapterToNumber(existingStr);
+              
+              let shouldUpdate = false;
+              
+              // 1. If new manga → Add
+              if (existingStr === undefined) {
+                shouldUpdate = true;
+                console.log(`📝 Added ${mangaId} → "${chapterStr}"`);
+              } 
+              // 2. If both are valid numbers → Compare numerically
+              else if (chapterNum !== null && existingNum !== null) {
+                if (chapterNum > existingNum) {
+                  shouldUpdate = true;
+                  console.log(`📝 Updated ${mangaId} → "${chapterStr}" (was "${existingStr}")`);
+                } else {
+                  console.log(`ℹ️  ${mangaId} unchanged (${chapterNum} ≤ ${existingNum})`);
+                }
+              } 
+              // 3. If existing is unknown ("?") → Update to known
+              else if (existingNum === null && chapterNum !== null) {
+                shouldUpdate = true;
+                console.log(`📝 Updated ${mangaId} → "${chapterStr}" (was unknown)`);
+              }
+              
+              if (shouldUpdate) {
+                // ✅ STORE AS STRING (Trimmed)
+                list[mangaId] = chapterStr;
+              }
+            } else {
+              console.log('⚠️  Could not extract mangaId, skipping list.json update');
+            }
+            
+            // ✅ Write list.json
+            fs.writeFileSync('list.json', JSON.stringify(list, null, 2));
+            console.log('✅ list.json updated (String Format)');
+          EOF
+
+      - name: Commit list.json changes
+        run: |
+          git add list.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update tracked chapters [skip ci]" || true
+            git pull --rebase origin ${{ github.ref_name }} || true
+            git push origin HEAD:${{ github.ref_name }} || true
+          else
+            echo "ℹ️  No changes to list.json"
+          fi
+
+      - name: Cleanup downloaded files
+        run: |
+          rm -rf node_modules/
+          rm -f package-lock.json
+          rm -rf *_ds.zip
+          rm -rf *_cover.jpg
+          rm -rf Miren_no_Tonbo/
+          find . -type d -name "*_ds" -exec rm -rf {} + 2>/dev/null || true
+
+      - name: Summary
+        if: success()
+        run: |
+          echo "## ✅ Process Complete" >> $GITHUB_STEP_SUMMARY
+          echo "- 📤 Files sent to Telegram" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📋 Tracked Chapters (list.json)" >> $GITHUB_STEP_SUMMARY
+          echo '```json' >> $GITHUB_STEP_SUMMARY
+          cat list.json 2>/dev/null || echo '{}' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
