@@ -1,0 +1,19 @@
+{
+  "name": "manga-downloader",
+  "version": "1.0.0",
+  "description": "Download, optimize, and send manga to Telegram",
+  "type": "module",
+  "main": "basic.js",
+  "scripts": {
+    "download": "node basic.js",
+    "download:tg": "node basic.js data.json true"
+  },
+  "dependencies": {
+    "sharp": "^0.33.5",
+    "p-limit": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
+}
